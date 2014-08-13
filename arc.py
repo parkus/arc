@@ -5,6 +5,8 @@ Created on Wed Jul 30 16:39:51 2014
 @author: Parke
 """
 import numpy as np
+import my_numpy as mynp
+from scipy.interpolate import interp1d
 
 def trend_detect(t,data,rho_min=0.8,Ntrends=None):
     """Detect the systematic trends in the data included as columns in the array
@@ -71,7 +73,7 @@ def trend_detect(t,data,rho_min=0.8,Ntrends=None):
             if (not Ntrends) and rho1 < rho_min:
                 break
             else:
-                trend = emd(U[:,0])
+                trend = sift(U[:,0])[:,0]
                 trends = np.hstack([trends,trend])
                 if Ntrends and len(trends == Ntrends): break
                 yarray = trend_remove(data, trends)
