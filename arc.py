@@ -143,5 +143,28 @@ def basisweights(data, basisset, hhparams, varweights=True, stop=1e-3):
 
     return w
 
+def shannon_entropy(weights):
+    """
+    Compute the Shannon Entropy of a set or sets of weights.
+
+    Parameters
+    ----------
+    weights : array-like
+        The weights for which to compute the shannon entropy. To rapidly
+        compute the shannon entropy of several sets of weights, supply
+        a 2D array with the sets of weights arranged in columns.
+
+    Returns
+    -------
+    entropies : float or array
+        The entropy or entropies, according to whether input was 1D or 2D.
+    """
+    w = np.asarray(weights)
+    w = np.squeeze(w)
+    axis = 0 if w.ndim > 1 else None
+    p = w/np.sum(w**2, axis=axis)
+    H = -np.sum(p*np.log2(p), axis=axis)
+    return H
+
 def trend_remove(data, trends):
     pass
