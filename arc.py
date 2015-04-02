@@ -162,7 +162,7 @@ def shannon_entropy(weights):
     w = np.asarray(weights)
     w = np.squeeze(w)
     axis = 0 if w.ndim > 1 else None
-    p = w/np.sum(w**2, axis=axis)
+    p = w**2/np.sum(w**2, axis=axis)
     H = -np.sum(p*np.log2(p), axis=axis)
     return H
 
