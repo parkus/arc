@@ -7,15 +7,16 @@ Modification History:
 2015 April written by R. O. Parke Loyd
 """
 import numpy as np
-from scipy import sparse
+import emd
 
-def arc(data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=None,
+def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         keep_fac=2.0):
-    """Identify systematic trends in the data. Trends are removed as part
-    of the identification process.
+    """Identify systematic trends in the data.
 
     Parameters
     ----------
+    t : 1D array-like
+        The independent data, generally time.
     data : 2D array-like
         The data (e.g. lightcurves). Should have shape NxM where there are
         N data points for M separate series.
@@ -33,8 +34,8 @@ def arc(data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=None,
         rho_min. If both are specified, iteration will stop when the first
         criterion is met.
     denoise : function, optional
-        Denoising function to apply to each trend. For example, Roberts et al.
-        (2013, MNRAS 435:3639) use Emprical Mode Decomposition.
+        Denoising function to apply to each trend. The default is empirical
+        mode decomposition as used in Roberts et al.
     keep_fac : float, optional
         Combine all trends with a shannon entropy > max/fac, where max is
         the maximum shannon entropy of all candidate trends. Note that shannon
@@ -66,9 +67,14 @@ def arc(data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=None,
     # median subtract and mean-normalize the data
     data = data - np.median(data, axis=0)
     normfacs = np.std(data, axis=0)
+    if np.any(normfacs == 0.0):
+        raise ValueError("One or more sereis has zero variance. ARC can't "
+                         "search for trends in such constant series.")
     data = data/normfacs
     if dataerrs is not None:
         dataerrs = dataerrs/normfacs
+
+    original_data = data
 
     while True:
         # get basis sets, i.e. the set of weights for each lightcurve that
@@ -97,9 +103,8 @@ def arc(data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=None,
         # estimate trend error
         # NOTE: the errors for each trend in ys are HIGHLY CORRELATED
         # as propagating errors through PCA is already confusing, I'll just
-        # estimate by taking the largest error of any trend for a given point
-        # to be conservative
-        trenderr = np.max(errs, axis=1)
+        # estimate by taking the minumum error of any given trend.
+        trenderr = np.min(errs, axis=1, keepdims=True)
 
         # break out of loop if we've reached a trend that has too low a
         # spectral radius (doesn't explain the data well)
@@ -125,8 +130,8 @@ def arc(data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=None,
             break
 
         # fit and subtract all the trends identified so far from the data
-        newdata = [trend_remove(d, trends)[0] for d in data.T]
-        data = np.array(newdata).T
+        data = [trend_remove(d, trends)[0] for d in original_data.T]
+        data = np.array(data).T
 
     return trends, trenderrs
 
@@ -179,6 +184,7 @@ def basisweights(data, basisset, hhparams=[1e-2, 1e-4, 1e-2, 1e-4],
         else:
             P = P.T
     K = P.shape[1]
+    if K == 0: raise ValueError('No basis series provided.')
 
     # iterate to converge on basis set weights by succesively updating weights,
     # hyperparams, and hyperhyperparams
@@ -245,28 +251,17 @@ def principle_component(trends, trends_err=None):
     T = np.matrix(trends)
 
     # compute principal component
-    lu, U = np.linalg.eig(T * T.T)
-    lu, U = np.real(lu), np.real(U)
+    l, U = np.linalg.eig(T * T.T)
+    l, U = np.real(l), np.real(U)
 #    normfac = np.linalg.norm(T) # not sure why I tried this initially...
     normfac = np.sqrt(np.sum(np.array(T[:,0])**2)) # this is tested to work
     U = U*normfac
     pc = np.array(U[:, 0])
 
     # spectral radius
-    rho = float(lu[0]/lu.sum())
+    rho = float(l[0]/l.sum())
 
-    # compute errors
-#    if trends_err is not None:
-#        Terr = np.matrix(trends_err)
-#        lv, V = np.linalg.eig(T.T * T)
-#        S = sparse.diags(np.sqrt(lv), 0, T.shape)
-#
-#        pc_err = np.sqrt(np.power(Terr * Z[:, 0]), 2)
-#        pc_err = np.array(pc_err)
-#    else:
-    pc_err = None
-
-    return pc, pc_err, rho
+    return pc, rho
 
 def construct(basisset, weights, basiserrs=None):
     """
@@ -382,6 +377,7 @@ def trend_remove(data, trends, data_err=None, trend_errs=None):
             raise ValueError('If one of daterr and trenderrs is supplied '
                              'then both must be supplied.')
     err = (data_err is not None)
+    if trends.shape[1] == 0: raise ValueError("No trends supplied.")
 
     # median subtract and mean-normalize the data
     med = np.median(data)
@@ -401,3 +397,27 @@ def trend_remove(data, trends, data_err=None, trend_errs=None):
         detrended_err, trendfit_err = map(restore, [detrended_err, trendfit_err])
 
     return detrended, trendfit, detrended_err, trendfit_err
+
+def arc_emd(y, min_rel_std=0.9):
+    """
+    Denoise the data in y by returning the intrinsic mode (or residual) with
+    the largest variance, but only if it has a standard deviation at least
+    min_rel_std of the original.
+
+    Parameters
+    ----------
+    y : 1D array-like
+        The data to be denoised.
+    min_rel_std : float, optional
+        The minimum allowable standard deviation of the returned series
+        relative to the original. This is intended to prevent the denoising
+        step of ARC from removing removing any real trend in the data.
+
+    Result
+    ------
+    y_denoised : 1D array
+        The denoised data, or the original data if attempting to denoise
+        resulted in a series with std deviation < min_rel_std.
+    """
+
+    modes, residual = emd.emd()
