@@ -9,6 +9,27 @@ Modification History:
 import numpy as np
 import emd
 
+def arc_emd(t, y):
+    """
+    Denoise the data in y by returning the intrinsic mode (or residual) with
+    the largest variance as found using empirical mode decomposition.
+
+    Parameters
+    ----------
+    y : 1D array-like
+        The data to be denoised.
+
+    Result
+    ------
+    y_denoised : 1D array
+        The denoised data.
+    """
+    modes, residual = emd.emd(t, y)
+    choices = np.append(modes, residual[:, np.newaxis], axis=1)
+    stds = np.var(choices, axis=0)
+    i_choice = np.argmax(stds)
+    return choices[:, i_choice]
+
 def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         keep_fac=2.0):
     """Identify systematic trends in the data.
@@ -35,7 +56,10 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         criterion is met.
     denoise : function, optional
         Denoising function to apply to each trend. The default is empirical
-        mode decomposition as used in Roberts et al.
+        mode decomposition as used in Roberts et al. This requires an external
+        module. You can use github.com/parkus/emd or adapt the function of
+        your choice. Any denoising function must accept two 1D arrays as
+        input (t and y) and return the "denoised" y.
     keep_fac : float, optional
         Combine all trends with a shannon entropy > max/fac, where max is
         the maximum shannon entropy of all candidate trends. Note that shannon
@@ -50,6 +74,11 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
     trenderrs : 2D numpy array
         Conservatively estimated errors in the trends. NOT EXACT. None if no data
         errors are supplied.
+
+    Notes
+    -----
+    The EMD denoising step seems to be more important
+    TODO:
     """
 
     if dataerrs is not None and denoise is not None:
@@ -398,26 +427,3 @@ def trend_remove(data, trends, data_err=None, trend_errs=None):
 
     return detrended, trendfit, detrended_err, trendfit_err
 
-def arc_emd(y, min_rel_std=0.9):
-    """
-    Denoise the data in y by returning the intrinsic mode (or residual) with
-    the largest variance, but only if it has a standard deviation at least
-    min_rel_std of the original.
-
-    Parameters
-    ----------
-    y : 1D array-like
-        The data to be denoised.
-    min_rel_std : float, optional
-        The minimum allowable standard deviation of the returned series
-        relative to the original. This is intended to prevent the denoising
-        step of ARC from removing removing any real trend in the data.
-
-    Result
-    ------
-    y_denoised : 1D array
-        The denoised data, or the original data if attempting to denoise
-        resulted in a series with std deviation < min_rel_std.
-    """
-
-    modes, residual = emd.emd()
