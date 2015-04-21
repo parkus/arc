@@ -14,7 +14,7 @@ M = 200 # number of data series
 t = np.arange(N)
 
 # generate random amplitudes, periods, and phases
-amps = r.uniform(0.0, 10.0, M)
+amps = r.normal(1.0, 0.3, M)
 phases = r.uniform(0.0, 2*pi, M)
 periods = r.uniform(4.0, 4.0 * N, M)
 
@@ -23,13 +23,19 @@ make_curve = lambda a, P, ph: a * np.sin(2*pi * t / P + ph)
 data_list = map(make_curve, amps, periods, phases)
 data = np.transpose(data_list)
 
+# add noise
+rel_amps = r.uniform(high=0.05, size=M)
+rel_noise = r.normal(size=[N, M]) * rel_amps[np.newaxis, :]
+abs_noise = rel_noise * amps[np.newaxis, :]
+data = data + abs_noise
+
 ## CREATE TRENDS
 
 # function to mean subtract and std dev normalize
 norm = lambda y: (y - np.mean(y)) / np.std(y)
 
 # exponential decay
-exp = norm(np.exp(- t / (N * 2.0)))
+exp = norm(np.exp( t / (N * 1.0)))
 
 # quadratic
 quad = norm((t - N/2.0)**2)
@@ -38,20 +44,23 @@ quad = norm((t - N/2.0)**2)
 
 # injection function
 def inject(data, trend, amp_mean, amp_std):
-    shape = (amp_mean/amp_std)**2
-    scale = amp_mean/shape
-    amps = r.gamma(shape, scale, M)
-    factor_list = [a * trend + 1.0 for a in amps]
-    factors = np.transpose(factor_list)
-    return data*factors
+#    shape = (amp_mean/amp_std)**2
+#    scale = amp_mean/shape
+#    rel_amps = r.gamma(shape, scale, M)
+    rel_amps = r.normal(amp_mean, amp_std, M)
+    abs_amps = amps * rel_amps
+    trend_list = [trend * a for a in abs_amps]
+    trends = np.transpose(trend_list)
+    return data + trends
 
 # inject!
 trended = np.copy(data)
-trended = inject(trended, exp, 2.0, 0.05)
-trended = inject(trended, quad, 1.0, 0.05)
+trended = inject(trended, exp, 0.0, 5.0)
+trended = inject(trended, quad, 0.0, 1.0)
 
-## FIND TRENDS
-trends = arc.arc(t, trended, rho_min=0.6, refine=False)
+## FIND TRENDS IN SUBSET OF DATA
+subset = trended[:, r.choice(M, size=50)]
+trends = arc.arc(t, subset, rho_min=0.6, refine=False)
 
 ## PLOT TRENDS
 import matplotlib.pyplot as plt
