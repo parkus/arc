@@ -30,8 +30,8 @@ def arc_emd(t, y):
     i_choice = np.argmax(stds)
     return choices[:, i_choice]
 
-def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
-        keep_fac=2.0):
+def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
+        refine=1e-3):
     """Identify systematic trends in the data.
 
     Parameters
@@ -41,8 +41,6 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
     data : 2D array-like
         The data (e.g. lightcurves). Should have shape NxM where there are
         N data points for M separate series.
-    dataerrs : 2D array-like
-        Errors on the data that will be propogated into the trends.
     rho_min : float
         The stopping threshold for the iterative trend identification process.
         This specifies the spectral radius of the first principal component
@@ -54,7 +52,7 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         Number of trends to identify -- an alternative stopping condition to
         rho_min. If both are specified, iteration will stop when the first
         criterion is met.
-    denoise : function, optional
+    denoise : {None|function}, optional
         Denoising function to apply to each trend. The default is empirical
         mode decomposition as used in Roberts et al. This requires an external
         module. You can use github.com/parkus/emd or adapt the function of
@@ -64,6 +62,8 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         Combine all trends with a shannon entropy > max/fac, where max is
         the maximum shannon entropy of all candidate trends. Note that shannon
         entropies generally span orders of magnitude.
+    refine :
+    TODO:
 
     Returns
     -------
@@ -71,37 +71,33 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         The identified trends. The array will have shape NxK, N data points
         for K trends. Trends will be normalized to have zero mean and unit
         standard deviation.
-    trenderrs : 2D numpy array
-        Conservatively estimated errors in the trends. NOT EXACT. None if no data
-        errors are supplied.
 
     Notes
     -----
-    The EMD denoising step seems to be more important
-    TODO:
+    The EMD denoising step seems to be more important than Roberts et al. let
+    on. From experimenting, I've found that it is necessary for separating
+    out different trends. While it won't distinguish between two different
+    polynomials, it will, for example, separate a polynomial from a sine
+    because these represent different "intrinsic modes." This is particularly
+    important when different trends are present at different strengths for
+    a given data series. However, EMD has the disadvantage of smoothing out
+    discontinuities in trends.
     """
-
-    if dataerrs is not None and denoise is not None:
-        raise ValueError('Trend errors cannont be esimated from the data'
-                         'errors is a denoising shceme is also used.')
-
+    # groom the input
     N, M = data.shape
-    def emptyarr():
-        x = np.array([])
-        x.shape = [N,0]
-        return x
-    trends = emptyarr()
-    trenderrs = None if dataerrs is None else emptyarr()
+    trends = np.empty([N, 0], dtype=data.dtype)
+    if refine:
+        identical = lambda a, b: np.allclose(a, b, rtol=refine, atol=0.0)
+    if denoise is not None:
+        dn = denoise
+        denoise = lambda t, y: np.reshape(dn(t, y[:, 0]), [N, 1])
 
-    # median subtract and mean-normalize the data
-    data = data - np.median(data, axis=0)
-    normfacs = np.std(data, axis=0)
-    if np.any(normfacs == 0.0):
+    # mean subtract and sigma-normalize the data
+    try:
+        data = _normalize(data)[0]
+    except ValueError:
         raise ValueError("One or more sereis has zero variance. ARC can't "
                          "search for trends in such constant series.")
-    data = data/normfacs
-    if dataerrs is not None:
-        dataerrs = dataerrs/normfacs
 
     original_data = data
 
@@ -124,16 +120,10 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         weights = weights[keep, :]
 
         # compute the leading trends from the weights
-        ys, errs = construct(data, weights, dataerrs)
+        ys = construct(data, weights)
 
-        # find the principle componenet of the retined trends
-        trend, rho = principle_component(ys, errs)
-
-        # estimate trend error
-        # NOTE: the errors for each trend in ys are HIGHLY CORRELATED
-        # as propagating errors through PCA is already confusing, I'll just
-        # estimate by taking the minumum error of any given trend.
-        trenderr = np.min(errs, axis=1, keepdims=True)
+        # find the principle componenet of the retained trends
+        trend, rho = principle_component(ys)
 
         # break out of loop if we've reached a trend that has too low a
         # spectral radius (doesn't explain the data well)
@@ -142,18 +132,26 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
 
         # denoise the trend, if desired
         if denoise is not None:
-            trend = denoise(trend)
+            trend = denoise(t, trend)
+
+        if refine:
+            # fit all data to the trend to re-extract it and continue
+            # doing so until convergence to a relative precision of refine
+            oldtrend = np.zeros([N, 1])
+            while not identical(oldtrend, trend):
+                oldtrend = trend
+                weights = basisweights(trend, data, varweights=False)
+                trend = construct(data, weights)
+                trend = trend.reshape([N, 1])
+#                if denoise is not None:
+#                    trend = denoise(t, trend[:, np.newaxis])
+                trend = _normalize(trend)[0]
 
         # normalize the trend
-        trend -= np.median(trend)
-        normfac = np.std(trend)
-        trend = trend/normfac
+        trend = _normalize(trend)[0]
 
         # record the trend
         trends = np.append(trends, trend, axis=1)
-        if dataerrs is not None:
-            trenderr = trenderr/normfac
-            trenderrs = np.append(trenderrs, trenderr, axis=1)
 
         if Ntrends and len(trends == Ntrends):
             break
@@ -161,8 +159,9 @@ def arc(t, data, dataerrs=None, rho_min=0.8, Ntrends=None, denoise=arc_emd,
         # fit and subtract all the trends identified so far from the data
         data = [trend_remove(d, trends)[0] for d in original_data.T]
         data = np.array(data).T
+        data = _normalize(data)[0]
 
-    return trends, trenderrs
+    return trends
 
 def basisweights(data, basisset, hhparams=[1e-2, 1e-4, 1e-2, 1e-4],
                  varweights=True, stop=1e-3):
@@ -255,7 +254,7 @@ def basisweights(data, basisset, hhparams=[1e-2, 1e-4, 1e-2, 1e-4],
 
     return np.squeeze(np.array(w))
 
-def principle_component(trends, trends_err=None):
+def principle_component(trends):
     """
     Find the principal compenent of a set of trends (principle component
     analysis).
@@ -265,15 +264,11 @@ def principle_component(trends, trends_err=None):
     trends : 2D array-like
         A set of trends (or any series) with shape NxM where there are M trends
         of N data points each.
-    trends_err : 2D array-like, optional
-        Errors on the trends.
 
     Returns
     -------
     pc : 1D array
         The principle component of the trends as a len(N) array.
-    pc_err : 1D array
-        Propagated error on the principal component.
     rho : float
         The spectral radius of the returned trend.
     """
@@ -292,7 +287,7 @@ def principle_component(trends, trends_err=None):
 
     return pc, rho
 
-def construct(basisset, weights, basiserrs=None):
+def construct(basisset, weights):
     """
     Construct a series by linearly combining the basis set series according
     to the weights.
@@ -308,8 +303,6 @@ def construct(basisset, weights, basiserrs=None):
         the output. Either a 1D array of length N may be supplied or an array
         of shape KxM, where M is the number of sereis there are K sets of
         weights to compute output for.
-    basiserrs : 2D array-like
-        Errors of the series to be propagated.
 
     Returns
     -------
@@ -317,30 +310,17 @@ def construct(basisset, weights, basiserrs=None):
         The data series constructed from the basisset and weights. If
         weights is 2D, y will be 2d with shape NxK, otherwise it will be 1D
         with length N.
-    yerr : 1D or 2D array
-        If basiserrs is supplied, yerr will also be output with the same shape
-        as y that represents a propagation of the erros in the basisset data
-        (assuming the weights to have no error). Otherwise, it will be None.
     """
+    # vet the input
     b, w = map(np.asarray, [basisset, weights])
     if w.ndim == 1:
         w = w.reshape(1, len(w))
 
+    # compute the result using matrix multiplication
     y = np.dot(w, b.T).T
-
-    if basiserrs is not None:
-        sigs = np.asarray(basiserrs)
-        sig2s = sigs**2
-        ysig2s = np.dot(w**2, sig2s.T).T
-        yerr = np.sqrt(ysig2s)
-    else:
-        yerr = None
-
     y = np.squeeze(y)
-    if basiserrs is not None:
-        yerr = np.squeeze(yerr)
 
-    return y, yerr
+    return y
 
 def shannon_entropy(weights):
     """
@@ -362,15 +342,19 @@ def shannon_entropy(weights):
     -----
     Zeros in the weights array will be ignored (otherwise the result is NaN).
     """
+    # vet the input
     w = np.asarray(weights)
     w = np.squeeze(w)
     w = w.T
     axis = 0 if w.ndim > 1 else None
+
+    # compute the entropies
     p = w**2/np.sum(w**2, axis=axis)
     H = -np.nansum(p*np.log2(p), axis=axis)
+
     return H
 
-def trend_remove(data, trends, data_err=None, trend_errs=None):
+def trend_remove(data, trends):
     """
     Fit and remove the provided trends from the data.
 
@@ -380,10 +364,6 @@ def trend_remove(data, trends, data_err=None, trend_errs=None):
         The data to fit, length N.
     trends : 2D array-like
         The trends to fit to the data, dimensions NxM where there are M trends.
-    dataerr = 1D array-like, optional
-        Data errors.
-    trenderrs : 2D array-like, optional
-        Trend errors.
 
     Returns
     -------
@@ -391,39 +371,46 @@ def trend_remove(data, trends, data_err=None, trend_errs=None):
         The data with the trend subtracted, length N.
     trendfit : 1D array
         The fit of the trend to the data, length N.
-    detrended_err : 1D array
-        Errors on the detrended data. None if errors aren't supplied.
-    trendfit_err : 1D array
-        Errors on the trend fit. None if errors aren't supplied.
 
     Notes
     -----
     If daterr or trenderrs is supplied, the other must also be supplied or
     errors cannot be propagated.
     """
-    if ((data_err is None and trend_errs is not None) or
-        (data_err is not None and trend_errs is None)):
-            raise ValueError('If one of daterr and trenderrs is supplied '
-                             'then both must be supplied.')
-    err = (data_err is not None)
     if trends.shape[1] == 0: raise ValueError("No trends supplied.")
 
-    # median subtract and mean-normalize the data
-    med = np.median(data)
-    fac = np.std(data)
-    data = (data - med)/fac
+    # mean subtract and sigma-normalize the data
+    data, restore = _normalize(data)
 
     # fit the data
     weights = basisweights(data, trends)
-    trendfit, trendfit_err = construct(trends, weights, trend_errs)
+    trendfit = construct(trends, weights)
     detrended = data - trendfit
-    detrended_err = np.sqrt(data_err**2 + trendfit_err**2) if err else None
 
     # undo the median subtract and normalization
-    restore = lambda x: (x * fac) + med
     detrended, trendfit = map(restore, [detrended, trendfit])
-    if err:
-        detrended_err, trendfit_err = map(restore, [detrended_err, trendfit_err])
 
-    return detrended, trendfit, detrended_err, trendfit_err
+    return detrended, trendfit
 
+def _normalize(y):
+    """
+    Mean-subtract and normalize the data in the columns of y. Return the
+    normalized data and a function that will return a single (1D array)
+    normalized series to the pre-normalized state.
+    """
+    nd = y.ndim
+    if nd == 1:
+        y = y.reshape([len(y), 1])
+
+    mn = np.mean(y, axis=0)
+    std = np.std(y, axis=0)
+    if np.any(std == 0.0):
+        raise ValueError("Can't normalize series with std dev of 0.0")
+    z = (y - mn) / std
+
+    restore = lambda x: (x * std) + mn
+
+    if nd == 1:
+        z = z[:, 0]
+
+    return z, restore

@@ -1,1 +1,1 @@
-import arc
+from arc import *
