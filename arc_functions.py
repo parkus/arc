@@ -9,7 +9,7 @@ Modification History:
 import numpy as np
 import emd
 
-def arc_emd(t, y):
+def arc_emd_choice(t, y, method='spline'):
     """
     Denoise the data in y by returning the intrinsic mode (or residual) with
     the largest variance as found using empirical mode decomposition.
@@ -18,20 +18,27 @@ def arc_emd(t, y):
     ----------
     y : 1D array-like
         The data to be denoised.
+    method : {'spline'|'saw'}
+        Which intrinsic mode identification process to employ.
 
     Result
     ------
     y_denoised : 1D array
         The denoised data.
     """
-    modes, residual = emd.emd(t, y)
+    if method == 'spline':
+        modes, residual = emd.emd(t, y)
+    if method == 'saw':
+        modes, residual = emd.saw_emd(t, y)
     choices = np.append(modes, residual[:, np.newaxis], axis=1)
     stds = np.var(choices, axis=0)
     i_choice = np.argmax(stds)
     return choices[:, i_choice]
 
-def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
-        refine=1e-3):
+arc_emd = lambda t, y: arc_emd_choice(t, y, 'spline')
+arc_emd_fast = lambda t, y: arc_emd_choice(t, y, 'saw')
+
+def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, Nkeep=10):
     """Identify systematic trends in the data.
 
     Parameters
@@ -53,17 +60,26 @@ def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
         rho_min. If both are specified, iteration will stop when the first
         criterion is met.
     denoise : {None|function}, optional
-        Denoising function to apply to each trend. The default is empirical
-        mode decomposition as used in Roberts et al. This requires an external
-        module. You can use github.com/parkus/emd or adapt the function of
-        your choice. Any denoising function must accept two 1D arrays as
-        input (t and y) and return the "denoised" y.
-    keep_fac : float, optional
-        Combine all trends with a shannon entropy > max/fac, where max is
-        the maximum shannon entropy of all candidate trends. Note that shannon
-        entropies generally span orders of magnitude.
-    refine :
-    TODO:
+        Denoising function to apply to each trend. With the accompanying emd
+        (empirical mode decomposition) module available at
+        https://github.com/parkus/emd, two built in denoising techniques can
+        bet used
+
+        - arc_emd : default
+            Performs empirical mode decomposition in the "traditional"
+            manner of fitting splines to the series extrema and selects
+            the resulting mode (or residual) with the largest variance.
+
+        - arc_emd_fast :
+            Same as the above, but using the sawtooth transform for speed
+            instead of spline fitting. This results in a slightly
+            difference set of intrinsic modes.
+
+        User defined denoising functions must accept two 1D arrays as input
+        (t and y) and return the "denoised" y.
+    Nkeep : int, optional
+        Number of candidate trends to use for computing the principal component
+        and spectral radius during each iteration.
 
     Returns
     -------
@@ -71,23 +87,10 @@ def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
         The identified trends. The array will have shape NxK, N data points
         for K trends. Trends will be normalized to have zero mean and unit
         standard deviation.
-
-    Notes
-    -----
-    The EMD denoising step seems to be more important than Roberts et al. let
-    on. From experimenting, I've found that it is necessary for separating
-    out different trends. While it won't distinguish between two different
-    polynomials, it will, for example, separate a polynomial from a sine
-    because these represent different "intrinsic modes." This is particularly
-    important when different trends are present at different strengths for
-    a given data series. However, EMD has the disadvantage of smoothing out
-    discontinuities in trends.
     """
     # groom the input
     N, M = data.shape
     trends = np.empty([N, 0], dtype=data.dtype)
-    if refine:
-        identical = lambda a, b: np.allclose(a, b, rtol=refine, atol=0.0)
     if denoise is not None:
         dn = denoise
         denoise = lambda t, y: np.reshape(dn(t, y[:, 0]), [N, 1])
@@ -115,8 +118,11 @@ def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
         entropies = shannon_entropy(weights)
 
         # keep only the M best (highest entropy) sets
-        entropy_cut = np.max(entropies)/keep_fac
-        keep = entropies > entropy_cut
+        args = np.argsort(entropies)[::-1]
+#        entropy_cut = np.max(entropies)/keep_fac
+#        keep = entropies > entropy_cut
+#        keep = args[entropies[args] > entropy_cut]
+        keep = args[:Nkeep]
         weights = weights[keep, :]
 
         # compute the leading trends from the weights
@@ -133,19 +139,6 @@ def arc(t, data, rho_min=0.8, Ntrends=None, denoise=arc_emd, keep_fac=2.0,
         # denoise the trend, if desired
         if denoise is not None:
             trend = denoise(t, trend)
-
-        if refine:
-            # fit all data to the trend to re-extract it and continue
-            # doing so until convergence to a relative precision of refine
-            oldtrend = np.zeros([N, 1])
-            while not identical(oldtrend, trend):
-                oldtrend = trend
-                weights = basisweights(trend, data, varweights=False)
-                trend = construct(data, weights)
-                trend = trend.reshape([N, 1])
-#                if denoise is not None:
-#                    trend = denoise(t, trend[:, np.newaxis])
-                trend = _normalize(trend)[0]
 
         # normalize the trend
         trend = _normalize(trend)[0]
@@ -342,17 +335,23 @@ def shannon_entropy(weights):
     -----
     Zeros in the weights array will be ignored (otherwise the result is NaN).
     """
-    # vet the input
+    w, axis = _groom_weights(weights)
+
+    # compute the entropies
+    p = w**2 / np.sum(w**2, axis=axis)
+    # put ones in the diagonal as a trick to ignore those values (log(1) = 0)
+    p[np.diag_indices_from(p)] = 1.0
+    H = -np.sum(p * np.log2(p), axis=axis)
+
+    return H
+
+def _groom_weights(weights):
+    """Groom an input weight array for use with entropy computing functions."""
     w = np.asarray(weights)
     w = np.squeeze(w)
     w = w.T
     axis = 0 if w.ndim > 1 else None
-
-    # compute the entropies
-    p = w**2/np.sum(w**2, axis=axis)
-    H = -np.nansum(p*np.log2(p), axis=axis)
-
-    return H
+    return w, axis
 
 def trend_remove(data, trends):
     """
