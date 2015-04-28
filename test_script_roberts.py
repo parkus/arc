@@ -1,4 +1,4 @@
-import arc
+import arc.arc_functions as arc # so that reload(arc) works, but note that you can also just do "import arc"
 import numpy as np
 import numpy.random as r
 from math import pi
@@ -42,25 +42,35 @@ quad = norm((t - N/2.0)**2)
 
 ## INJECT TRENDS
 
+def trend_array(rel_amps, trend):
+    abs_amps = rel_amps * amps
+    trend_list = [trend * a for a in abs_amps]
+    return np.transpose(trend_list)
+
+i = np.arange(M)
+decaying_amps = 5.0 * np.exp(-i / (M / 4))
+quad_arr = trend_array(decaying_amps, quad)
+exp_arr = trend_array(2 * decaying_amps[::-1], exp)
+trended = data + quad_arr + exp_arr
+
 # injection function
-def inject(data, trend, amp_mean, amp_std):
+#def inject(data, trend, amp_mean, amp_std):
 #    shape = (amp_mean/amp_std)**2
 #    scale = amp_mean/shape
 #    rel_amps = r.gamma(shape, scale, M)
-    rel_amps = r.normal(amp_mean, amp_std, M)
-    abs_amps = amps * rel_amps
-    trend_list = [trend * a for a in abs_amps]
-    trends = np.transpose(trend_list)
-    return data + trends
-
-# inject!
-trended = np.copy(data)
-trended = inject(trended, exp, 0.0, 5.0)
-trended = inject(trended, quad, 0.0, 1.0)
+#    trends = trend_array(rel_amps, trend)
+#    return data + trends
+##    rel_amps = r.normal(amp_mean, amp_std, M)
+#
+#
+## inject!
+#trended = np.copy(data)
+#trended = inject(trended, exp, 2.0, 1.0)
+#trended = inject(trended, quad, 1.0, 0.5)
 
 ## FIND TRENDS IN SUBSET OF DATA
 subset = trended[:, r.choice(M, size=50)]
-trends = arc.arc(t, subset, rho_min=0.6, refine=False)
+trends = arc.arc(t, subset, rho_min=0.6, denoise=arc.arc_emd, refine=False)
 
 ## PLOT TRENDS
 import matplotlib.pyplot as plt
